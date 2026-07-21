@@ -28,9 +28,10 @@ import (
 var reportedRemoteTagConflict sync.Map
 
 type InboundService struct {
-	xrayApi         xray.XrayAPI
-	clientService   ClientService
-	fallbackService FallbackService
+	xrayApi                   xray.XrayAPI
+	clientService             ClientService
+	fallbackService           FallbackService
+	trafficGenerationBoundary func([]string) (func(), error)
 }
 
 func (s *InboundService) runtimeFor(ib *model.Inbound) (runtime.Runtime, error) {
@@ -1084,6 +1085,10 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 }
 
 func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
+	// Serialize full admin rewrites with narrow inbound-scoped maintenance
+	// operations. UpdateInbound has no callers that already hold this lock.
+	defer lockInbound(inbound.Id).Unlock()
+
 	// Normalize streamSettings based on protocol
 	s.normalizeStreamSettings(inbound)
 	s.normalizeMtprotoSecret(inbound)

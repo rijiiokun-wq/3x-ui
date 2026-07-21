@@ -31,11 +31,27 @@ func (j *XrayTrafficJob) Run() {
 	if !j.xrayService.IsXrayRunning() {
 		return
 	}
-	traffics, clientTraffics, err := j.xrayService.GetXrayTraffic()
-	if err != nil {
+	var (
+		traffics        []*xray.Traffic
+		clientTraffics  []*xray.ClientTraffic
+		needRestart0    bool
+		clientsDisabled bool
+		err             error
+	)
+	collectionOK := func() bool {
+		unlockCollection := service.LockTrafficCollection()
+		defer unlockCollection()
+
+		traffics, clientTraffics, err = j.xrayService.GetXrayTraffic()
+		if err != nil {
+			return false
+		}
+		needRestart0, clientsDisabled, err = j.inboundService.AddTraffic(traffics, clientTraffics)
+		return true
+	}()
+	if !collectionOK {
 		return
 	}
-	needRestart0, clientsDisabled, err := j.inboundService.AddTraffic(traffics, clientTraffics)
 	if err != nil {
 		logger.Warning("add inbound traffic failed:", err)
 	}

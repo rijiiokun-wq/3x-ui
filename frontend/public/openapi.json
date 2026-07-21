@@ -2649,6 +2649,138 @@
         }
       }
     },
+    "/panel/api/inbounds/{id}/repairClientTrafficCycles": {
+      "post": {
+        "tags": [
+          "Inbounds"
+        ],
+        "summary": "Atomically repair expiry/reset/limit state for up to 50 clients in one local VLESS inbound on SQLite. This maintenance-only compare-and-swap endpoint validates independent settings and traffic snapshots plus exact email/UUID/subId/attachment identity. One stale or invalid item rejects the entire batch without mutation. resetTraffic also zeros up/down and re-enables the client; it is rejected unless the target cycle differs from expectedSettings, preventing receipt retries from resetting traffic twice.",
+        "operationId": "post_panel_api_inbounds_id_repairClientTrafficCycles",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Local VLESS inbound ID; every item.inboundId must match it exactly.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "example": {
+                "items": [
+                  {
+                    "inboundId": 7,
+                    "email": "client-component",
+                    "uuid": "550e8400-e29b-41d4-a716-446655440000",
+                    "subId": "shared-subscription-id",
+                    "expectedSettings": {
+                      "expiryTime": 1787000000000,
+                      "reset": 30,
+                      "total": 16106127360,
+                      "enable": false
+                    },
+                    "expectedTraffic": {
+                      "expiryTime": 1787000000000,
+                      "reset": 30,
+                      "total": 16106127360,
+                      "enable": false,
+                      "up": 123,
+                      "down": 456
+                    },
+                    "target": {
+                      "expiryTime": 1789500000000,
+                      "reset": 30,
+                      "total": 16106127360
+                    },
+                    "resetTraffic": true
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    },
+                    "obj": {}
+                  }
+                },
+                "example": {
+                  "success": true,
+                  "obj": {
+                    "updated": 1,
+                    "needRestart": true,
+                    "items": [
+                      {
+                        "index": 0,
+                        "status": "updated",
+                        "reason": "applied",
+                        "trafficReset": true,
+                        "reenabled": true
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "msg": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "success": false,
+                  "msg": "... stale_traffic_precondition",
+                  "obj": {
+                    "updated": 0,
+                    "needRestart": false,
+                    "items": [
+                      {
+                        "index": 0,
+                        "status": "rejected",
+                        "reason": "stale_traffic_precondition",
+                        "trafficReset": false,
+                        "reenabled": false
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/panel/api/inbounds/{id}/delAllClients": {
       "post": {
         "tags": [

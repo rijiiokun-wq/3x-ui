@@ -2,7 +2,10 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -73,10 +76,148 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/update/:id", a.updateInbound)
 	g.POST("/setEnable/:id", a.setInboundEnable)
 	g.POST("/:id/resetTraffic", a.resetInboundTraffic)
+	g.POST("/:id/repairClientTrafficCycles", a.repairClientTrafficCycles)
 	g.POST("/:id/delAllClients", a.delAllInboundClients)
 	g.POST("/resetAllTraffics", a.resetAllTraffics)
 	g.POST("/import", a.importInbound)
 	g.POST("/:id/fallbacks", a.setFallbacks)
+}
+
+type repairClientTrafficCycleSettingsExpectedRequest struct {
+	ExpiryTime *int64 `json:"expiryTime"`
+	Reset      *int   `json:"reset"`
+	Total      *int64 `json:"total"`
+	Enable     *bool  `json:"enable"`
+}
+
+type repairClientTrafficCycleTrafficExpectedRequest struct {
+	ExpiryTime *int64 `json:"expiryTime"`
+	Reset      *int   `json:"reset"`
+	Total      *int64 `json:"total"`
+	Enable     *bool  `json:"enable"`
+	Up         *int64 `json:"up"`
+	Down       *int64 `json:"down"`
+}
+
+type repairClientTrafficCycleTargetRequest struct {
+	ExpiryTime *int64 `json:"expiryTime"`
+	Reset      *int   `json:"reset"`
+	Total      *int64 `json:"total"`
+}
+
+type repairClientTrafficCycleItemRequest struct {
+	InboundID        *int                                             `json:"inboundId"`
+	Email            *string                                          `json:"email"`
+	UUID             *string                                          `json:"uuid"`
+	SubID            *string                                          `json:"subId"`
+	ExpectedSettings *repairClientTrafficCycleSettingsExpectedRequest `json:"expectedSettings"`
+	ExpectedTraffic  *repairClientTrafficCycleTrafficExpectedRequest  `json:"expectedTraffic"`
+	Target           *repairClientTrafficCycleTargetRequest           `json:"target"`
+	ResetTraffic     *bool                                            `json:"resetTraffic"`
+}
+
+type repairClientTrafficCyclesRequest struct {
+	Items []repairClientTrafficCycleItemRequest `json:"items"`
+}
+
+const maxRepairClientTrafficCyclesBodyBytes = 1 << 20
+
+func decodeRepairClientTrafficCyclesRequest(c *gin.Context, request *repairClientTrafficCyclesRequest) error {
+	body := http.MaxBytesReader(c.Writer, c.Request.Body, maxRepairClientTrafficCyclesBodyBytes)
+	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(request); err != nil {
+		return errors.New("invalid_request")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("invalid_request")
+	}
+	return nil
+}
+
+func repairClientTrafficCycleItemRequestComplete(item repairClientTrafficCycleItemRequest) bool {
+	return item.InboundID != nil && item.Email != nil && item.UUID != nil && item.SubID != nil &&
+		item.ExpectedSettings != nil && item.ExpectedSettings.ExpiryTime != nil &&
+		item.ExpectedSettings.Reset != nil && item.ExpectedSettings.Total != nil &&
+		item.ExpectedSettings.Enable != nil &&
+		item.ExpectedTraffic != nil && item.ExpectedTraffic.ExpiryTime != nil &&
+		item.ExpectedTraffic.Reset != nil && item.ExpectedTraffic.Total != nil &&
+		item.ExpectedTraffic.Enable != nil && item.ExpectedTraffic.Up != nil &&
+		item.ExpectedTraffic.Down != nil &&
+		item.Target != nil && item.Target.ExpiryTime != nil && item.Target.Reset != nil &&
+		item.Target.Total != nil && item.ResetTraffic != nil
+}
+
+// repairClientTrafficCycles is a narrow compare-and-swap maintenance API.  It
+// is registered under the authenticated panel API group and delegates all
+// mutation/atomicity guarantees to InboundService.
+func (a *InboundController) repairClientTrafficCycles(c *gin.Context) {
+	inboundID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), errors.New("invalid_inbound_id"))
+		return
+	}
+	var request repairClientTrafficCyclesRequest
+	if err := decodeRepairClientTrafficCyclesRequest(c, &request); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), errors.New("invalid_request"))
+		return
+	}
+
+	items := make([]service.ClientTrafficCycleRepairItem, len(request.Items))
+	for index, item := range request.Items {
+		if !repairClientTrafficCycleItemRequestComplete(item) {
+			jsonMsg(c, I18nWeb(c, "somethingWentWrong"), errors.New("invalid_request"))
+			return
+		}
+		items[index] = service.ClientTrafficCycleRepairItem{
+			InboundID: *item.InboundID,
+			Email:     *item.Email,
+			UUID:      *item.UUID,
+			SubID:     *item.SubID,
+			ExpectedSettings: service.ClientTrafficCycleSettingsExpected{
+				ExpiryTime: *item.ExpectedSettings.ExpiryTime,
+				Reset:      *item.ExpectedSettings.Reset,
+				Total:      *item.ExpectedSettings.Total,
+				Enable:     *item.ExpectedSettings.Enable,
+			},
+			ExpectedTraffic: service.ClientTrafficCycleTrafficExpected{
+				ExpiryTime: *item.ExpectedTraffic.ExpiryTime,
+				Reset:      *item.ExpectedTraffic.Reset,
+				Total:      *item.ExpectedTraffic.Total,
+				Enable:     *item.ExpectedTraffic.Enable,
+				Up:         *item.ExpectedTraffic.Up,
+				Down:       *item.ExpectedTraffic.Down,
+			},
+			Target: service.ClientTrafficCycleTarget{
+				ExpiryTime: *item.Target.ExpiryTime,
+				Reset:      *item.Target.Reset,
+				Total:      *item.Target.Total,
+			},
+			ResetTraffic: *item.ResetTraffic,
+		}
+	}
+
+	result, needRestart, err := a.inboundService.RepairClientTrafficCycles(inboundID, items)
+	if err != nil {
+		var repairErr *service.ClientTrafficCycleRepairError
+		if errors.As(err, &repairErr) {
+			// Reconstruct the error without its internal cause.  The public/logged
+			// form contains only an item index and stable machine code.
+			err = &service.ClientTrafficCycleRepairError{Index: repairErr.Index, Code: repairErr.Code}
+		} else {
+			err = errors.New("client traffic cycle repair failed: internal_error")
+		}
+		jsonMsgObj(c, I18nWeb(c, "somethingWentWrong"), result, err)
+		return
+	}
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
+	jsonObj(c, result, nil)
+	user := session.GetLoginUser(c)
+	a.broadcastInboundsUpdate(user.Id)
+	notifyClientsChanged()
 }
 
 // getInbounds retrieves the list of inbounds for the logged-in user.

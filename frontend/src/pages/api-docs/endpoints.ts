@@ -185,6 +185,17 @@ export const sections: readonly Section[] = [
       },
       {
         method: 'POST',
+        path: '/panel/api/inbounds/:id/repairClientTrafficCycles',
+        summary: 'Atomically repair expiry/reset/limit state for up to 50 clients in one local VLESS inbound on SQLite. This maintenance-only compare-and-swap endpoint validates independent settings and traffic snapshots plus exact email/UUID/subId/attachment identity. One stale or invalid item rejects the entire batch without mutation. resetTraffic also zeros up/down and re-enables the client; it is rejected unless the target cycle differs from expectedSettings, preventing receipt retries from resetting traffic twice.',
+        params: [
+          { name: 'id', in: 'path', type: 'number', desc: 'Local VLESS inbound ID; every item.inboundId must match it exactly.' },
+        ],
+        body: '{\n  "items": [\n    {\n      "inboundId": 7,\n      "email": "client-component",\n      "uuid": "550e8400-e29b-41d4-a716-446655440000",\n      "subId": "shared-subscription-id",\n      "expectedSettings": { "expiryTime": 1787000000000, "reset": 30, "total": 16106127360, "enable": false },\n      "expectedTraffic": { "expiryTime": 1787000000000, "reset": 30, "total": 16106127360, "enable": false, "up": 123, "down": 456 },\n      "target": { "expiryTime": 1789500000000, "reset": 30, "total": 16106127360 },\n      "resetTraffic": true\n    }\n  ]\n}',
+        response: '{\n  "success": true,\n  "obj": {\n    "updated": 1,\n    "needRestart": true,\n    "items": [{ "index": 0, "status": "updated", "reason": "applied", "trafficReset": true, "reenabled": true }]\n  }\n}',
+        errorResponse: '{\n  "success": false,\n  "msg": "... stale_traffic_precondition",\n  "obj": {\n    "updated": 0,\n    "needRestart": false,\n    "items": [{ "index": 0, "status": "rejected", "reason": "stale_traffic_precondition", "trafficReset": false, "reenabled": false }]\n  }\n}',
+      },
+      {
+        method: 'POST',
         path: '/panel/api/inbounds/:id/delAllClients',
         summary: 'Remove every client attached to a single inbound while keeping the inbound itself. Collects emails from settings.clients[] and feeds them into the optimized bulk-delete path (runtime user removal + traffic-row cleanup + SyncInbound). Destructive and cannot be undone.',
         params: [

@@ -1,10 +1,65 @@
 package service
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestTrafficWriterStrictRejectsMissingWriterWithoutRunningInline(t *testing.T) {
+	resetTrafficWriterForTest(t)
+
+	var ran atomic.Bool
+	err := submitTrafficWriteStrict(func() error {
+		ran.Store(true)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("submitTrafficWriteStrict error = %v, want not-running error", err)
+	}
+	if ran.Load() {
+		t.Fatal("strict traffic write ran inline without a writer")
+	}
+}
+
+func TestTrafficWriterStrictRunsThroughActiveWriter(t *testing.T) {
+	resetTrafficWriterForTest(t)
+	StartTrafficWriter()
+
+	var ran atomic.Bool
+	if err := submitTrafficWriteStrict(func() error {
+		ran.Store(true)
+		return nil
+	}); err != nil {
+		t.Fatalf("submitTrafficWriteStrict: %v", err)
+	}
+	if !ran.Load() {
+		t.Fatal("strict traffic write did not run")
+	}
+}
+
+func TestTrafficWriterStrictRejectsStoppingWriterWithoutRunningInline(t *testing.T) {
+	resetTrafficWriterForTest(t)
+	StartTrafficWriter()
+
+	twMu.Lock()
+	cancel := twCancel
+	twMu.Unlock()
+	cancel()
+
+	var ran atomic.Bool
+	err := submitTrafficWriteStrict(func() error {
+		ran.Store(true)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "stopping") {
+		t.Fatalf("submitTrafficWriteStrict error = %v, want stopping error", err)
+	}
+	if ran.Load() {
+		t.Fatal("strict traffic write ran inline while writer was stopping")
+	}
+}
 
 func TestTrafficWriterStartStopStartAcceptsWrites(t *testing.T) {
 	resetTrafficWriterForTest(t)

@@ -23,6 +23,14 @@ var (
 	isNeedXrayRestart atomic.Bool // Indicates that restart was requested for Xray
 	isManuallyStopped atomic.Bool // Indicates that Xray was stopped manually from the panel
 	result            string
+
+	// Service objects are instantiated by value throughout the panel. Traffic
+	// generation state therefore lives at package scope so the periodic job and
+	// maintenance endpoints always advance the same cumulative baseline.
+	sharedTrafficCollector = struct {
+		sync.Mutex
+		api xray.XrayAPI
+	}{}
 )
 
 // XrayService provides business logic for Xray process management.
@@ -30,7 +38,6 @@ var (
 type XrayService struct {
 	inboundService InboundService
 	settingService SettingService
-	xrayAPI        xray.XrayAPI
 }
 
 // IsXrayRunning checks if the Xray process is currently running.
@@ -356,19 +363,61 @@ func (s *XrayService) GetXrayTraffic() ([]*xray.Traffic, []*xray.ClientTraffic, 
 		logger.Debug("Attempted to fetch Xray traffic, but Xray is not running:", err)
 		return nil, nil, err
 	}
+	sharedTrafficCollector.Lock()
+	defer sharedTrafficCollector.Unlock()
+
 	apiPort := p.GetAPIPort()
-	if err := s.xrayAPI.Init(apiPort); err != nil {
+	if err := sharedTrafficCollector.api.Init(apiPort); err != nil {
 		logger.Debug("Failed to initialize Xray API:", err)
 		return nil, nil, err
 	}
-	defer s.xrayAPI.Close()
+	defer sharedTrafficCollector.api.Close()
 
-	traffic, clientTraffic, err := s.xrayAPI.GetTraffic()
+	traffic, clientTraffic, err := sharedTrafficCollector.api.GetTraffic()
 	if err != nil {
 		logger.Debug("Failed to fetch Xray traffic:", err)
 		return nil, nil, err
 	}
 	return traffic, clientTraffic, nil
+}
+
+// BeginClientTrafficGenerationBoundary advances only the selected users'
+// cumulative traffic baselines on the persistent collector shared with the
+// periodic XrayTrafficJob. The caller must hold LockTrafficCollection until it
+// either commits its paired database reset or invokes the returned rollback.
+func (s *XrayService) BeginClientTrafficGenerationBoundary(emails []string) (func(), error) {
+	if !s.IsXrayRunning() {
+		return nil, errors.New("xray is not running")
+	}
+	sharedTrafficCollector.Lock()
+	apiPort := p.GetAPIPort()
+	if err := sharedTrafficCollector.api.Init(apiPort); err != nil {
+		sharedTrafficCollector.Unlock()
+		return nil, err
+	}
+	rollback, err := sharedTrafficCollector.api.AdvanceClientTrafficBaselines(emails)
+	sharedTrafficCollector.api.Close()
+	sharedTrafficCollector.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			sharedTrafficCollector.Lock()
+			defer sharedTrafficCollector.Unlock()
+			rollback()
+		})
+	}, nil
+}
+
+func resetSharedTrafficCollectorBaseline() {
+	unlockCollection := LockTrafficCollection()
+	defer unlockCollection()
+	sharedTrafficCollector.Lock()
+	defer sharedTrafficCollector.Unlock()
+	sharedTrafficCollector.api.StatsLastValues = nil
 }
 
 // RestartXray restarts the Xray process, optionally forcing a restart even if config unchanged.
@@ -393,7 +442,7 @@ func (s *XrayService) RestartXray(isForce bool) error {
 
 	p = xray.NewProcess(xrayConfig)
 	result = ""
-	s.xrayAPI.StatsLastValues = nil
+	resetSharedTrafficCollectorBaseline()
 	err = p.Start()
 	if err != nil {
 		return err

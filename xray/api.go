@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/mhsanaei/3x-ui/v3/logger"
@@ -319,6 +320,73 @@ func (x *XrayAPI) GetTraffic() ([]*Traffic, []*ClientTraffic, error) {
 		}
 	}
 	return mapToSlice(tagTrafficMap), mapToSlice(emailTrafficMap), nil
+}
+
+// AdvanceClientTrafficBaselines establishes a rollbackable generation
+// boundary for the selected users without consuming anybody else's pending
+// traffic. It observes the same cumulative Xray counters used by GetTraffic,
+// advances only the exact user uplink/downlink baselines, and returns a
+// closure which restores their previous presence and values if the database
+// transaction paired with the boundary does not commit.
+//
+// Callers must serialize this method with GetTraffic for the lifetime of the
+// returned rollback decision. The panel's traffic collection gate provides
+// that serialization.
+func (x *XrayAPI) AdvanceClientTrafficBaselines(emails []string) (restore func(), err error) {
+	if len(emails) == 0 {
+		return func() {}, nil
+	}
+	if x.StatsServiceClient == nil {
+		return nil, common.NewError("xray StatusServiceClient is not initialized")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+	response, err := (*x.StatsServiceClient).QueryStats(ctx, &statsService.QueryStatsRequest{Reset_: false})
+	if err != nil {
+		return nil, err
+	}
+
+	targets := make(map[string]struct{}, len(emails)*2)
+	for _, email := range emails {
+		targets["user>>>"+email+">>>traffic>>>uplink"] = struct{}{}
+		targets["user>>>"+email+">>>traffic>>>downlink"] = struct{}{}
+	}
+	observed := make(map[string]int64, len(targets))
+	for _, stat := range response.GetStat() {
+		if _, wanted := targets[stat.Name]; wanted {
+			observed[stat.Name] = stat.Value
+		}
+	}
+
+	type savedBaseline struct {
+		value   int64
+		present bool
+	}
+	if x.StatsLastValues == nil {
+		x.StatsLastValues = make(map[string]int64)
+	}
+	saved := make(map[string]savedBaseline, len(targets))
+	for name := range targets {
+		value, present := x.StatsLastValues[name]
+		saved[name] = savedBaseline{value: value, present: present}
+		// Missing Xray stats define a zero generation boundary for that exact
+		// direction; no unrelated baseline is read or changed.
+		x.StatsLastValues[name] = observed[name]
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for name, old := range saved {
+				if old.present {
+					x.StatsLastValues[name] = old.value
+				} else {
+					delete(x.StatsLastValues, name)
+				}
+			}
+		})
+	}, nil
 }
 
 // processTraffic aggregates a traffic stat into trafficMap using regex matches and value.

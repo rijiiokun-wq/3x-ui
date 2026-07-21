@@ -120,6 +120,18 @@ func safeApply(fn func() error) (err error) {
 }
 
 func submitTrafficWrite(fn func() error) error {
+	return submitTrafficWriteMode(fn, false)
+}
+
+// submitTrafficWriteStrict is for maintenance operations that must never race
+// a traffic poll.  Unlike submitTrafficWrite, it fails closed when the writer
+// is not running or is stopping; silently falling back to an inline write would
+// violate the operation's serialization contract.
+func submitTrafficWriteStrict(fn func() error) error {
+	return submitTrafficWriteMode(fn, true)
+}
+
+func submitTrafficWriteMode(fn func() error, strict bool) error {
 	req := &trafficWriteRequest{apply: fn, done: make(chan error, 1)}
 
 	twMu.Lock()
@@ -128,12 +140,18 @@ func submitTrafficWrite(fn func() error) error {
 	done := twDone
 	if queue == nil || ctx == nil || done == nil {
 		twMu.Unlock()
+		if strict {
+			return errors.New("traffic writer is not running")
+		}
 		return safeApply(fn)
 	}
 
 	select {
 	case <-ctx.Done():
 		twMu.Unlock()
+		if strict {
+			return errors.New("traffic writer is stopping")
+		}
 		return safeApply(fn)
 	default:
 	}

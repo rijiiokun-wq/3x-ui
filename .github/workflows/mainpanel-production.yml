@@ -1,0 +1,171 @@
+name: MainPanel production deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Операция
+        required: true
+        type: choice
+        options:
+          - deploy
+          - rollback-binary
+      source_sha:
+        description: Полный SHA текущего HEAD maintenance/v3.3 (только deploy)
+        required: false
+        type: string
+      release_run_id:
+        description: ID успешного post-merge Release run (только deploy)
+        required: false
+        type: string
+      backup_ref:
+        description: Обезличенная ссылка backup (только rollback-binary)
+        required: false
+        type: string
+      confirmation:
+        description: DEPLOY MAINPANEL или ROLLBACK MAINPANEL
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: mainpanel-production
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Проверка происхождения и параметров
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      release_run_id: ${{ steps.release.outputs.release_run_id }}
+      artifact_id: ${{ steps.release.outputs.artifact_id }}
+      artifact_digest: ${{ steps.release.outputs.artifact_digest }}
+      backup_ref: ${{ steps.rollback.outputs.backup_ref }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Проверить deploy-ввод и GitHub provenance
+        id: release
+        if: inputs.operation == 'deploy'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CONFIRMATION" == 'DEPLOY MAINPANEL' ]]
+          scripts/mainpanel-deploy/github_release_preflight.sh \
+            "$GITHUB_REPOSITORY" "$SOURCE_SHA" "$RELEASE_RUN_ID" metadata "$RUNNER_TEMP/preflight"
+
+      - name: Проверить rollback-ввод
+        id: rollback
+        if: inputs.operation == 'rollback-binary'
+        env:
+          BACKUP_REF: ${{ inputs.backup_ref }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$CONFIRMATION" == 'ROLLBACK MAINPANEL' ]]
+          [[ "$BACKUP_REF" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$ ]]
+          printf 'backup_ref=%s\n' "$BACKUP_REF" >>"$GITHUB_OUTPUT"
+
+  deploy:
+    name: Развернуть точный бинарник
+    needs: preflight
+    if: inputs.operation == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: mainpanel-production
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Повторно скачать и проверить artifact
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RELEASE_RUN_ID: ${{ needs.preflight.outputs.release_run_id }}
+        run: |
+          set -Eeuo pipefail
+          scripts/mainpanel-deploy/github_release_preflight.sh \
+            "$GITHUB_REPOSITORY" "$SOURCE_SHA" "$RELEASE_RUN_ID" download "$RUNNER_TEMP/release"
+
+      - name: Backup, атомарная установка, health-check и автооткат
+        id: transaction
+        env:
+          MAINPANEL_HOST: ${{ secrets.MAINPANEL_HOST }}
+          MAINPANEL_USER: ${{ secrets.MAINPANEL_USER }}
+          MAINPANEL_SSH_KEY: ${{ secrets.MAINPANEL_SSH_KEY }}
+          MAINPANEL_KNOWN_HOSTS: ${{ secrets.MAINPANEL_KNOWN_HOSTS }}
+          MAINPANEL_HEALTH_TOKEN: ${{ secrets.MAINPANEL_HEALTH_TOKEN }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RELEASE_RUN_ID: ${{ needs.preflight.outputs.release_run_id }}
+          ARTIFACT_DIGEST: ${{ needs.preflight.outputs.artifact_digest }}
+          BINARY_SHA: ${{ steps.release.outputs.binary_sha }}
+        run: |
+          bash scripts/mainpanel-deploy/github_remote_transaction.sh \
+            deploy \
+            scripts/mainpanel-deploy/remote_controller.sh \
+            "$RUNNER_TEMP/release/x-ui" \
+            "$SOURCE_SHA" \
+            "$BINARY_SHA" \
+            "$RELEASE_RUN_ID" \
+            "$ARTIFACT_DIGEST"
+
+      - name: Записать проверенный результат
+        env:
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          RELEASE_RUN_ID: ${{ needs.preflight.outputs.release_run_id }}
+          ARTIFACT_DIGEST: ${{ needs.preflight.outputs.artifact_digest }}
+          BINARY_SHA: ${{ steps.release.outputs.binary_sha }}
+          BACKUP_REF: ${{ steps.transaction.outputs.backup_ref }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$BACKUP_REF" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$ ]]
+          {
+            printf '## MainPanel deployment\n\n'
+            printf -- '- Статус: успешно\n'
+            printf -- '- Source SHA: `%s`\n' "$SOURCE_SHA"
+            printf -- '- Release run: `%s`\n' "$RELEASE_RUN_ID"
+            printf -- '- Artifact digest: `%s`\n' "$ARTIFACT_DIGEST"
+            printf -- '- Binary SHA-256: `%s`\n' "$BINARY_SHA"
+            printf -- '- Backup ref: `%s`\n' "$BACKUP_REF"
+            printf -- '- Health: systemd, версия, OpenAPI repair route и Xray running подтверждены\n'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    name: Ручной binary-only rollback
+    needs: preflight
+    if: inputs.operation == 'rollback-binary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: mainpanel-production
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Восстановить валидированный бинарник
+        env:
+          MAINPANEL_HOST: ${{ secrets.MAINPANEL_HOST }}
+          MAINPANEL_USER: ${{ secrets.MAINPANEL_USER }}
+          MAINPANEL_SSH_KEY: ${{ secrets.MAINPANEL_SSH_KEY }}
+          MAINPANEL_KNOWN_HOSTS: ${{ secrets.MAINPANEL_KNOWN_HOSTS }}
+          MAINPANEL_HEALTH_TOKEN: ${{ secrets.MAINPANEL_HEALTH_TOKEN }}
+          BACKUP_REF: ${{ needs.preflight.outputs.backup_ref }}
+        run: |
+          bash scripts/mainpanel-deploy/github_remote_transaction.sh \
+            rollback-binary \
+            scripts/mainpanel-deploy/remote_controller.sh \
+            "$BACKUP_REF"
+          {
+            printf '## MainPanel rollback\n\n'
+            printf -- '- Статус: успешно\n'
+            printf -- '- Восстановлен backup ref: `%s`\n' "$BACKUP_REF"
+            printf -- '- Режим: только бинарник, без безусловного отката БД\n'
+            printf -- '- Health: systemd, версия, OpenAPI repair route и Xray running подтверждены\n'
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,32 @@
+name: MainPanel deploy guard
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/mainpanel-production.yml
+      - .github/workflows/mainpanel-deploy-ci.yml
+      - scripts/mainpanel-deploy/**
+      - tests/mainpanel-deploy/**
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/mainpanel-production.yml
+      - .github/workflows/mainpanel-deploy-ci.yml
+      - scripts/mainpanel-deploy/**
+      - tests/mainpanel-deploy/**
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shell syntax and ShellCheck
+        run: |
+          bash -n scripts/mainpanel-deploy/*.sh tests/mainpanel-deploy/*.sh
+          shellcheck scripts/mainpanel-deploy/*.sh tests/mainpanel-deploy/*.sh
+      - name: Artifact and workflow tests
+        run: tests/mainpanel-deploy/run.sh

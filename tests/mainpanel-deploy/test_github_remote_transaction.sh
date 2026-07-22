@@ -13,6 +13,9 @@ fail() {
   exit 1
 }
 
+real_sha256sum=$(command -v sha256sum) || fail 'sha256sum is unavailable'
+[[ -x "$real_sha256sum" ]] || fail 'sha256sum is not executable'
+
 assert_file_exact() {
   local expected=$1
   local path=$2
@@ -63,6 +66,7 @@ run_scenario() {
     MOCK_REMOTE_ROOT="$case_dir/remote" \
     MOCK_REMOTE_LOG="$case_dir/transport.log" \
     MOCK_REMOTE_BIN="$temp/remote-bin" \
+    MOCK_REAL_SHA256SUM="$real_sha256sum" \
     MOCK_SCENARIO="$scenario" \
     MOCK_SUCCESS_RESULT="$success_result" \
     MOCK_ROLLED_BACK_RESULT="$rolled_back_result" \

@@ -104,7 +104,8 @@ case "$mock_name" in
 
   sha256sum)
     log_call "$@"
-    /sbin/sha256sum "$@"
+    : "${MOCK_REAL_SHA256SUM:?}"
+    "$MOCK_REAL_SHA256SUM" "$@"
     ;;
 
   systemd-run)

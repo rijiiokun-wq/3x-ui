@@ -98,6 +98,8 @@ ssh_opts=(
 remote_exec() {
   local command=''
   printf -v command '%q ' "$@"
+  # The complete remote command is intentionally escaped above before SSH.
+  # shellcheck disable=SC2029
   ssh "${ssh_opts[@]}" "$target" "$command"
 }
 
@@ -185,6 +187,8 @@ if ((launch_rc != 0)); then
 fi
 
 poll_state() {
+  # Positional parameters must expand only in the remote Bash process.
+  # shellcheck disable=SC2016
   remote_exec /bin/bash -c '
     if grep -Eq "^RESULT " "$1"; then
       printf "result-ready\n"

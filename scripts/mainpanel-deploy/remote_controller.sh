@@ -472,7 +472,13 @@ main() {
   trap 'failure_reason=signal_interrupt; exit 130' INT
   trap 'failure_reason=signal_terminate; exit 143' TERM
   [[ $EUID -eq 0 ]] || die 'root_required'
-  command -v flock >/dev/null && command -v sqlite3 >/dev/null && command -v python3 >/dev/null && command -v curl >/dev/null || die 'missing_runtime_dependency'
+  if ! command -v flock >/dev/null ||
+    ! command -v sqlite3 >/dev/null ||
+    ! command -v python3 >/dev/null ||
+    ! command -v curl >/dev/null
+  then
+    die 'missing_runtime_dependency'
+  fi
   [[ -x "$binary_path" && -f "$database_path" ]] || die 'production_layout_mismatch'
   install -d -m 0700 "$deploy_root" "$backups_root" "$state_root"
   exec 9>"$lock_path"

@@ -423,6 +423,76 @@ func TestRepairClientTrafficCyclesWithoutResetPreservesCountersAndEnable(t *test
 	}
 }
 
+func TestRepairClientTrafficCyclesWithoutResetAcceptsMonotonicCounterGrowth(t *testing.T) {
+	f := setupCycleRepairFixture(t, true)
+	item := f.item(cycleRepairEmailA, 200_000, false)
+	if err := database.GetDB().Model(&xray.ClientTraffic{}).
+		Where("inbound_id = ? AND email = ?", f.inbound.Id, cycleRepairEmailA).
+		UpdateColumns(map[string]any{"up": int64(17), "down": int64(19)}).Error; err != nil {
+		t.Fatalf("simulate traffic growth after caller snapshot: %v", err)
+	}
+	boundaryCalled := false
+	svc := &InboundService{trafficGenerationBoundary: func([]string) (func(), error) {
+		boundaryCalled = true
+		return func() {}, nil
+	}}
+
+	result, needRestart, err := svc.RepairClientTrafficCycles(
+		f.inbound.Id,
+		[]ClientTrafficCycleRepairItem{item},
+	)
+	if err != nil {
+		t.Fatalf("deadline-only repair after counter growth: %v", err)
+	}
+	if needRestart || result.NeedRestart || result.Updated != 1 || result.Items[0].TrafficReset {
+		t.Fatalf("unexpected deadline-only result: %+v needRestart=%v", result, needRestart)
+	}
+	if boundaryCalled {
+		t.Fatal("deadline-only repair unexpectedly advanced runtime baseline")
+	}
+	var traffic xray.ClientTraffic
+	if err := database.GetDB().Where("email = ?", cycleRepairEmailA).First(&traffic).Error; err != nil {
+		t.Fatalf("reload traffic: %v", err)
+	}
+	if traffic.ExpiryTime != 200_000 || traffic.Up != 17 || traffic.Down != 19 || traffic.Enable {
+		t.Fatalf("deadline-only repair did not preserve current counters: %+v", traffic)
+	}
+}
+
+func TestRepairClientTrafficCyclesWithResetRejectsCounterGrowth(t *testing.T) {
+	f := setupCycleRepairFixture(t, true)
+	item := f.item(cycleRepairEmailA, 200_000, true)
+	if err := database.GetDB().Model(&xray.ClientTraffic{}).
+		Where("inbound_id = ? AND email = ?", f.inbound.Id, cycleRepairEmailA).
+		UpdateColumns(map[string]any{"up": int64(17), "down": int64(19)}).Error; err != nil {
+		t.Fatalf("simulate traffic growth after reset receipt: %v", err)
+	}
+	settingsBefore := mustCycleRepairInboundSettings(t, f.inbound.Id)
+	var trafficBefore xray.ClientTraffic
+	if err := database.GetDB().Where("email = ?", cycleRepairEmailA).First(&trafficBefore).Error; err != nil {
+		t.Fatalf("reload traffic before reset attempt: %v", err)
+	}
+	recordBefore := f.records[cycleRepairEmailA]
+	boundaryCalled := false
+	svc := &InboundService{trafficGenerationBoundary: func([]string) (func(), error) {
+		boundaryCalled = true
+		return func() {}, nil
+	}}
+
+	result, needRestart, err := svc.RepairClientTrafficCycles(
+		f.inbound.Id,
+		[]ClientTrafficCycleRepairItem{item},
+	)
+	var repairErr *ClientTrafficCycleRepairError
+	if !errors.As(err, &repairErr) || repairErr.Code != "stale_traffic_precondition" {
+		t.Fatalf("reset counter race error = %v", err)
+	}
+	if needRestart || result.Updated != 0 || result.Items[0].TrafficReset || boundaryCalled {
+		t.Fatalf("stale reset changed state: result=%+v needRestart=%v boundary=%v", result, needRestart, boundaryCalled)
+	}
+	assertCycleRepairStateUnchanged(t, f.inbound.Id, settingsBefore, trafficBefore, recordBefore)
+}
+
 func TestRepairClientTrafficCyclesBoundaryFailureLeavesBatchUnchanged(t *testing.T) {
 	f := setupCycleRepairFixture(t, true)
 	settingsBefore := f.inbound.Settings

@@ -186,7 +186,7 @@ export const sections: readonly Section[] = [
       {
         method: 'POST',
         path: '/panel/api/inbounds/:id/repairClientTrafficCycles',
-        summary: 'Atomically repair expiry/reset/limit state for up to 50 clients in one local VLESS inbound on SQLite. This maintenance-only compare-and-swap endpoint validates independent settings and traffic snapshots plus exact email/UUID/subId/attachment identity. One stale or invalid item rejects the entire batch without mutation. resetTraffic also zeros up/down and re-enables the client; it is rejected unless the target cycle differs from expectedSettings, preventing receipt retries from resetting traffic twice.',
+        summary: 'Atomically repair expiry/reset/limit state for up to 50 clients in one local VLESS inbound on SQLite. This maintenance-only compare-and-swap endpoint validates independent settings and traffic snapshots plus exact email/UUID/subId/attachment identity. One stale or invalid item rejects the entire batch without mutation. Deadline-only repairs accept monotonic up/down growth and preserve current counters. resetTraffic keeps an exact up/down CAS, zeros both counters and re-enables the client; it is rejected unless the target cycle differs from expectedSettings, preventing receipt retries from resetting traffic twice.',
         params: [
           { name: 'id', in: 'path', type: 'number', desc: 'Local VLESS inbound ID; every item.inboundId must match it exactly.' },
         ],

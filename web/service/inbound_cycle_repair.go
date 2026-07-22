@@ -26,9 +26,10 @@ type ClientTrafficCycleSettingsExpected struct {
 	Enable     bool  `json:"enable"`
 }
 
-// ClientTrafficCycleTrafficExpected is the exact ClientTraffic state observed
-// by the caller. Up/Down make a successful reset a durable CAS boundary: a
-// retry with the old receipt is rejected before it can reset a second time.
+// ClientTrafficCycleTrafficExpected is the ClientTraffic state observed by the
+// caller. Policy fields are always exact. Up/Down are an exact CAS boundary for
+// resets; deadline-only repairs allow monotonic counter growth and preserve the
+// newer values instead of rejecting active clients.
 type ClientTrafficCycleTrafficExpected struct {
 	ExpiryTime int64 `json:"expiryTime"`
 	Reset      int   `json:"reset"`
@@ -228,7 +229,7 @@ func (s *InboundService) repairClientTrafficCyclesTx(
 		if traffic.InboundId != inboundID {
 			return rejectClientTrafficCycleRepair(result, index, "traffic_inbound_mismatch", nil)
 		}
-		if !cycleRepairTrafficMatchesExpected(traffic, item.ExpectedTraffic) {
+		if !cycleRepairTrafficMatchesExpected(traffic, item.ExpectedTraffic, item.ResetTraffic) {
 			return rejectClientTrafficCycleRepair(result, index, "stale_traffic_precondition", nil)
 		}
 
@@ -298,7 +299,7 @@ func (s *InboundService) repairClientTrafficCyclesTx(
 		}
 		trafficWrite := tx.Model(&xray.ClientTraffic{}).
 			Where(
-				"id = ? AND inbound_id = ? AND email = ? AND expiry_time = ? AND reset = ? AND total = ? AND enable = ? AND up = ? AND down = ?",
+				"id = ? AND inbound_id = ? AND email = ? AND expiry_time = ? AND reset = ? AND total = ? AND enable = ?",
 				plan.traffic.Id,
 				inboundID,
 				plan.item.Email,
@@ -306,10 +307,25 @@ func (s *InboundService) repairClientTrafficCyclesTx(
 				plan.item.ExpectedTraffic.Reset,
 				plan.item.ExpectedTraffic.Total,
 				plan.item.ExpectedTraffic.Enable,
+			)
+		if plan.item.ResetTraffic {
+			trafficWrite = trafficWrite.Where(
+				"up = ? AND down = ?",
 				plan.item.ExpectedTraffic.Up,
 				plan.item.ExpectedTraffic.Down,
-			).
-			Updates(trafficUpdates)
+			)
+		} else {
+			// Xray collection may legitimately advance counters between the
+			// caller's direct read and this transaction. A deadline-only repair
+			// never writes counters, so accept monotonic growth but reject a
+			// decrease that may indicate an intervening reset.
+			trafficWrite = trafficWrite.Where(
+				"up >= ? AND down >= ?",
+				plan.item.ExpectedTraffic.Up,
+				plan.item.ExpectedTraffic.Down,
+			)
+		}
+		trafficWrite = trafficWrite.Updates(trafficUpdates)
 		if trafficWrite.Error != nil {
 			return rejectClientTrafficCycleRepair(result, index, "traffic_write_failed", trafficWrite.Error)
 		}
@@ -516,13 +532,22 @@ func applyCycleRepairSettingsTarget(rawClient json.RawMessage, item ClientTraffi
 	return json.Marshal(client)
 }
 
-func cycleRepairTrafficMatchesExpected(row xray.ClientTraffic, expected ClientTrafficCycleTrafficExpected) bool {
-	return row.ExpiryTime == expected.ExpiryTime &&
+func cycleRepairTrafficMatchesExpected(
+	row xray.ClientTraffic,
+	expected ClientTrafficCycleTrafficExpected,
+	resetTraffic bool,
+) bool {
+	policyMatches := row.ExpiryTime == expected.ExpiryTime &&
 		row.Reset == expected.Reset &&
 		row.Total == expected.Total &&
-		row.Enable == expected.Enable &&
-		row.Up == expected.Up &&
-		row.Down == expected.Down
+		row.Enable == expected.Enable
+	if !policyMatches {
+		return false
+	}
+	if resetTraffic {
+		return row.Up == expected.Up && row.Down == expected.Down
+	}
+	return row.Up >= expected.Up && row.Down >= expected.Down
 }
 
 func rawJSON(value any) json.RawMessage {

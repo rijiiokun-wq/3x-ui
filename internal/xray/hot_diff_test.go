@@ -366,7 +366,7 @@ func TestComputeHotDiff_SecuritySwitchToRealityNeedsRestart(t *testing.T) {
 	}
 }
 
-func TestComputeHotDiff_RealityClientOnlyChangeStaysHot(t *testing.T) {
+func TestComputeHotDiff_RealityClientOnlyChangeNeedsRestart(t *testing.T) {
 	oldCfg := makeHotConfig()
 	oldCfg.InboundConfigs[1].StreamSettings = json_util.RawMessage(`{"network":"tcp","security":"reality","realitySettings":{"privateKey":"k"}}`)
 	oldCfg.InboundConfigs[1].Settings = json_util.RawMessage(`{"clients":[{"email":"a","id":"uuid-a"}],"decryption":"none"}`)
@@ -374,15 +374,8 @@ func TestComputeHotDiff_RealityClientOnlyChangeStaysHot(t *testing.T) {
 	newCfg.InboundConfigs[1].StreamSettings = json_util.RawMessage(`{"network":"tcp","security":"reality","realitySettings":{"privateKey":"k"}}`)
 	newCfg.InboundConfigs[1].Settings = json_util.RawMessage(`{"clients":[{"email":"a","id":"uuid-a"},{"email":"b","id":"uuid-b"}],"decryption":"none"}`)
 
-	diff, ok := ComputeHotDiff(oldCfg, newCfg)
-	if !ok {
-		t.Fatal("client-only change on a REALITY inbound must stay hot-appliable")
-	}
-	if len(diff.RemovedInboundTags) != 0 || len(diff.AddedInbounds) != 0 {
-		t.Fatalf("client-only change must not replace the handler, got %+v", diff)
-	}
-	if len(diff.AddedUsers) != 1 || diff.AddedUsers[0].Email != "b" {
-		t.Fatalf("expected user b added via AlterInbound, got %+v", diff.AddedUsers)
+	if _, ok := ComputeHotDiff(oldCfg, newCfg); ok {
+		t.Fatal("client-only change on a REALITY inbound must force a full restart")
 	}
 }
 

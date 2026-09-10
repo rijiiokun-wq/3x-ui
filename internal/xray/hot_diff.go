@@ -125,12 +125,12 @@ func diffInbounds(oldCfg, newCfg *Config, diff *HotDiff) bool {
 			logger.Debug("hot diff: inbound [", oldIb.Tag, "] carries a reverse-tagged client, forcing a full restart instead of a hot swap")
 			return false
 		}
+		if exists && (inboundUsesReality(oldIb) || inboundUsesReality(newIb)) {
+			logger.Debug("hot diff: inbound [", oldIb.Tag, "] uses REALITY; production Xray cores can silently lose the listener after AlterInbound user changes, forcing a full restart")
+			return false
+		}
 		if exists && diffInboundUsers(oldIb, newIb, diff) {
 			continue
-		}
-		if exists && (inboundUsesReality(oldIb) || inboundUsesReality(newIb)) {
-			logger.Debug("hot diff: inbound [", oldIb.Tag, "] REALITY configuration changed; a gRPC remove+add does not reliably rebuild the REALITY authenticator, forcing a full restart")
-			return false
 		}
 		if exists && (inboundUsesTproxy(oldIb) || inboundUsesTproxy(newIb)) {
 			logger.Debug("hot diff: inbound [", oldIb.Tag, "] is a TPROXY target; a gRPC add reports success but does not reliably bind a working listener, forcing a full restart instead of a hot swap")
